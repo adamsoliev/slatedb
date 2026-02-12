@@ -30,40 +30,35 @@ Manifest - metadata
 
 Trade offs
 
-```mermaid
-sequenceDiagram
-  box Memory
-    participant C as Client
-    participant MT as MemTable (mutable)
-    participant IMT as MemTable (immutable)
-  end
-  box Disk
-    participant L0 as L0 SSTable
-    participant SR as SR (sorted run)
-  end
+<img src="images/read-path.png" width="600">
 
-  C->>SR: get()
-  MT-->>C: key-value pair (if found)
-  IMT-->>C: key-value pair (if found)
-  L0-->>C: key-value pair (if found)
-  SR-->>C: key-value pair (if found)
+<img src="images/write-path.png" width="600">
+
+
+Files
+
+SlateDB object store directory contains 3 main directories: manifest, wal and compacted.
+```
+path/to/db/
+├─ manifest/
+│  ├─ 00000000000000000001.manifest     // <manifest_id>.manifest
+│  ├─ 00000000000000000002.manifest
+│  └─ ...
+├─ wal/
+│  ├─ 00000000000000000001.sst          // <wal_id>.sst
+│  ├─ 00000000000000000002.sst
+│  └─ ...
+└─ compacted/
+   ├─ 01K3XYV1W2WR4FDVB7A9S319YS.sst    // <ulid>.sst
+   ├─ 01K3XYV9JFPSZ5BW3Y1DVMKDFS.sst
+   └─ ...
 ```
 
-```mermaid
-sequenceDiagram
-  box Memory
-    participant C as Client
-    participant MT as MemTable (mutable)
-    participant IMT as MemTable (immutable)
-  end
-  box Object Storage
-    participant SST as SSTable
-    participant SR as Sorted Run
-  end
+Writes (put(), write(), or delete())
 
-  C->>MT: put()
-  MT-->>C: update OK
-  MT-->>IMT: freeze
-  IMT-->>SST: write
-  SST-->>SR: compact
-```
+sync part: write to in-memory WAL and then to in-memory MemTable.
+async part: WAL is periodically flushed; during this process, in-memory WAL is frozen. MemTable is periodically flushed; during this process, in-memory MemTable is frozed.
+
+Reads (get(), scan(), or similar)
+  
+checks in-memory mutable MemTable, then immutable one; then concurrently searches L0 SSTables and all compacted sorted runs through their block index
