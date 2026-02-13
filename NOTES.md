@@ -12,11 +12,11 @@ Batching writes to every 10ms caps at 100 requests/second, dropping cost to ~$1,
 This creates a three-way trade-off between cost, latency, and durability.
 Think CAP for object store writes: cost/latency/durability ([source](https://x.com/criccomini/status/1781356213764321768)).
 
-```
-↑ cost ↑ latency ↑ durability = sync writes
-↑ cost ↓ latency ↑ durability = sync batch writes
-↓ cost ↓ latency ↓ durability = async batch writes
-```
+|               | cost | latency | durability |
+|---------------|------|---------|------------|
+| sync          | HIGH | HIGH    | HIGH       |
+| sync batch    | HIGH | LOW     | HIGH       |
+| async batch   | LOW  | LOW     | LOW        |
 
 Reduce API costs by batching.
 Clients can wait (durability) or not (latency).
@@ -61,6 +61,31 @@ path/to/db/
    ├─ 01K3XYV9JFPSZ5BW3Y1DVMKDFS.sst
    └─ ...
 ```
+
+The manifest directory contains an ordered list of manifest files. 
+Each manifest file is a complete snapshot of the database state at the time it was written. 
+The name represents the manifest’s ID. Manifest IDs are monotonically increasing and contiguous. The manifest with the highest ID is considered the current manifest.
+A manifest file can be updated by a single writer, multiple readers and a single compactor. 
+All updates are done by (1) find largest manifest file (2) read that manifest (3) update it in memory (4) write the updated manifest to the next slot using compare-and-swap (CAS) operation. 
+To prevent prevent zombie writers, it will use CAS to ensure each SST is written exactly one time – using writer epochs to determine when the current writer is a zombie and halt the process.
+Each manifest is encoded as a FlatBuffer.
+The size calculation (in bytes) for the manifest is:
+```
+  2                         // manifest_format_version
++ 8                         // writer_epoch
++ 8                         // compactor_epoch
++ 8                         // wal_id_last_compacted
++ 8                         // wal_id_last_seen
++ 4 + ~56 * leveled_ssts    // array length + leveled_ssts (~32 byte key + 24 bytes = ~56 bytes)
++ 4 + 28 * snapshots        // array length + snapshots (28 bytes each)
+```
+A manifest with 1000 snapshots and 100,000 compacted SSTs would be ~5.6 MiB. 
+With 100MB/s to and from S3, it would take 56ms to read and 56ms to write (+overhead). All in, let’s say 250-500ms.
+
+WAL is a sequentially ordered contiguous list of SSTs (both WAL and compacted files store SSTs, which differs from other LSMs because SlateDB's put(k,v) is batched).
+The WAL is used to store writes that have not yet been compacted.
+
+The compacted directory contains both L0 (non-partitioned) SSTables and SRs (partitioned SSTables). As the compactor runs, it will drop compacted SSTables from the manifest. Such files will be left in the compacted directory until the garbage collector runs.
 
 ## Write Path
 
