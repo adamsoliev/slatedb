@@ -144,7 +144,28 @@ WAL SSTs are not read during normal operations; they are only accessed during re
 
 ## Compaction
 
-The compactor merges sorted runs (including L0 SSTs) to reduce space amplification (removing old/deleted rows) and read amplification (fewer runs to search).
-It has four components: `Compactor` (event loop), `CompactorEventHandler` (reacts to manifest poll ticks, executor updates, and shutdown), `CompactionScheduler` (decides what to compact), and `CompactionExecutor` (sort-merges runs into a new run).
+The main writer compacts the WAL to L0 directly from the memtable rather than reading back the WAL first.
+The compactor merges L0 and lower-level SSTs into sorted runs, reducing space amplification (removing old/deleted rows) and read amplification (fewer runs to search).
+
+```
+WAL (raw write-ahead log)
+  ↓  writer compacts directly from memtable
+L0 (unpartitioned SSTs — no key-range partitioning)
+  ↓  compactor merges when #SSTs > l0_compaction_threshold
+L1, L2, L3, … (Sorted Runs, key-range partitioned within each SR)
+```
+
+SlateDB uses size-tiered compaction, which organizes sorted runs (SRs) into logical levels based on size.
+The key invariant: runs in level N are at most size S(N), where S grows exponentially (S(N) = base_size × threshold^N).
+When too many runs accumulate at a level, they get merged into a single new run at the next level.
+Multiple sorted runs can coexist at the same level — that is what distinguishes tiered from leveled compaction (leveled enforces one run per level, forcing more merging).
+Each SR spans the full keyspace and is made up of an ordered series of SSTs, each containing a distinct subset of that keyspace.
+SRs within a level are ordered by age.
+
+Tiered has lower write amplification (roughly by a factor of T, the per-level run threshold).
+Since SlateDB lives on object storage where network bandwidth — not disk — is the bottleneck, write amplification (= more network I/O) is a real concern.
+The trade-off is more space and read amplification, both addressable: object storage is cheap so space amplification is tolerable, bloom filters dramatically reduce read amplification, and future work ("lazy leveling") can fix space amplification at the last level by keeping only a single SR there.
+
+The compactor has four components: `Compactor` (event loop), `CompactorEventHandler` (reacts to manifest poll ticks, executor updates, and shutdown), `CompactionScheduler` (decides what to compact), and `CompactionExecutor` (sort-merges runs into a new run).
 The scheduler is pluggable via `CompactionSchedulerSupplier`; the only current policy is size-tiered (`SizeTieredCompactionSchedulerSupplier`).
-The executor is also pluggable via `CompactionExecutor`; the only current implementation is `TokioCompactionExecutor`.
+The executor is pluggable via `CompactionExecutor`; the only current implementation is `TokioCompactionExecutor`.
