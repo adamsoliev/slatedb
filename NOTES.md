@@ -1,43 +1,41 @@
-https://materializedview.io/p/cloud-storage-triad-latency-cost-durability
+# SlateDB Notes
 
-thesis is object stores to converge on low latency reads and writes with atomicity
+Source: https://materializedview.io/p/cloud-storage-triad-latency-cost-durability
 
-PUTs are $0.005 per 1k requests (eg ~$130k per month for 10k requests a second service), there’s no choice but to batch writes. Limiting writes to every 10ms leads to max 100 request per second, which costs ~$1300.
+## Thesis
 
-This leads to cost, latency and durability trade off.
-⬆️ cost ⬇️ latency ⬆️ durability = sync writes
-⬇️ cost ⬆️ latency ⬆️ durability = sync batch writes
-⬇️ cost ⬇️ latency ⬇️ durability = async batch writes
+Object stores are converging on low latency reads and writes with atomicity.
 
-SlateDB, by contrast, writes everything (including the WAL) to object storage
+PUTs cost $0.005 per 1k requests.
+At 10k requests/second, that is ~$130k/month.
+Batching writes to every 10ms caps at 100 requests/second, dropping cost to ~$1,300/month.
+This creates a three-way trade-off between cost, latency, and durability.
 
-SlateDB, by contrast, caches recent writes in memory
+SlateDB addresses this by writing everything (including the WAL) to object storage while caching recent writes in memory.
 
-Keys are limited to a maximum of 65 KiB (65,535 bytes). Values are limited to a maximum of 4 GiB (4,294,967,295 bytes).
+## API
 
-API
-put(key, value): Insert a key-value pair. 
-get(key): Retrieve a key-value pair.
-delete(key): Delete a key-value pair.
-scan(range): Scan a range of keys.
-flush(): Flush the in-memory data to disk.
+- `put(key, value)` -- insert a key-value pair
+- `get(key)` -- retrieve a key-value pair
+- `delete(key)` -- delete a key-value pair
+- `scan(range)` -- scan a range of keys
+- `flush()` -- flush in-memory data to object storage
 
-Write-ahead log (WAL) - an append-only persistent log
-MemTables - a sorted in-memory map; mutable one receives writes while the froze MemTable is flushed in the background
-SSTables - a sorted on-disk map;
-Compaction - merging of multiple SSTables into a new sequence of range partitioned SSTables
-Manifest - metadata
+Keys are limited to 65 KiB (65,535 bytes).
+Values are limited to 4 GiB (4,294,967,295 bytes).
 
-Trade offs
+## Core Components
 
-<img src="images/read-path.png" width="600">
+- **Write-ahead log (WAL)** -- append-only persistent log
+- **MemTables** -- sorted in-memory map; mutable one receives writes, immutable one is flushed in the background
+- **SSTables** -- sorted on-disk (object storage) map
+- **Compaction** -- merging multiple SSTables into range-partitioned sorted runs
+- **Manifest** -- durable metadata tracking all SSTs and sorted runs
 
-<img src="images/write-path.png" width="600">
+## Storage Layout
 
+SlateDB's object store directory contains three directories: `manifest`, `wal`, and `compacted`.
 
-Files
-
-SlateDB object store directory contains 3 main directories: manifest, wal and compacted.
 ```
 path/to/db/
 ├─ manifest/
@@ -54,11 +52,55 @@ path/to/db/
    └─ ...
 ```
 
-Writes (put(), write(), or delete())
+## Write Path
 
-sync part: write to in-memory WAL and then to in-memory MemTable.
-async part: WAL is periodically flushed; during this process, in-memory WAL is frozen. MemTable is periodically flushed; during this process, in-memory MemTable is frozed.
+```mermaid
+sequenceDiagram
+  box Memory
+    participant C as Client
+    participant MT as MemTable (mutable)
+    participant IMT as MemTable (immutable)
+  end
+  box Object Storage
+    participant SST as SSTable
+    participant SR as Sorted Run
+  end
 
-Reads (get(), scan(), or similar)
-  
-checks in-memory mutable MemTable, then immutable one; then concurrently searches L0 SSTables and all compacted sorted runs through their block index
+  C->>MT: put()
+  MT-->>C: update OK
+  MT-->>IMT: freeze
+  IMT-->>SST: write
+  SST-->>SR: compact
+```
+
+Synchronous: write to in-memory WAL, then to in-memory MemTable.
+
+Asynchronous: WAL is periodically flushed (in-memory WAL is frozen during flush).
+MemTable is periodically flushed (in-memory MemTable is frozen during flush).
+
+## Read Path
+
+```mermaid
+sequenceDiagram
+  box Memory
+    participant C as Client
+    participant MT as MemTable (mutable)
+    participant IMT as MemTable (immutable)
+  end
+  box Object Storage
+    participant L0 as L0 SSTable
+    participant SR as Sorted Run
+  end
+
+  C->>SR: get()
+  MT-->>C: key-value pair (if found)
+  IMT-->>C: key-value pair (if found)
+  L0-->>C: key-value pair (if found)
+  SR-->>C: key-value pair (if found)
+```
+
+Lookup order: mutable MemTable, then immutable MemTable, then concurrent search across L0 SSTables and compacted sorted runs via block index.
+
+## Compaction
+
+TODO
