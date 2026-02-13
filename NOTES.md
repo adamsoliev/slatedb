@@ -62,11 +62,14 @@ path/to/db/
    └─ ...
 ```
 
-**Manifest** -- each file is a complete FlatBuffer-encoded snapshot of the database state.
+**Manifest** -- each file is a complete FlatBuffer-encoded snapshot of the database state: writer info, compactor info, and snapshots.
+`writer_epoch` (monotonic `u64`) is incremented on writer startup; on increment, the writer fences older clients by writing an empty SST with the new epoch. Any writer with a lower epoch is a zombie ([writer protocol](https://slatedb.io/rfcs/0001-manifest/#writer-protocol)).
+`compactor_epoch` works the same way for the compactor.
+Snapshots are pointers to previous `.manifest` files, established by readers on startup ([read protocol](https://slatedb.io/rfcs/0001-manifest/#reader-protocol)). They prevent compaction from deleting in-use SSTs and give multiple clients a consistent view.
+
 IDs are monotonically increasing and contiguous; the highest ID is the current manifest.
 A single writer, multiple readers, and a single compactor can access it.
-Updates follow a read-modify-write pattern: find the largest manifest, read it, update in memory, write to the next slot via compare-and-swap (CAS).
-CAS also prevents zombie writers by using writer epochs to detect and halt stale writers.
+Updates are read-modify-write via CAS on the next manifest slot.
 
 Size estimate (bytes):
 ```
@@ -76,7 +79,7 @@ Size estimate (bytes):
 + 8                         // wal_id_last_compacted
 + 8                         // wal_id_last_seen
 + 4 + ~56 * leveled_ssts    // array length + ~56 bytes per SST
-+ 4 + 28 * snapshots        // array length + 28 bytes per snapshot
++ 4 + 28 * snapshots        // array length + 28 bytes per snapshot 
 ```
 Example: 1000 snapshots + 100k SSTs = ~5.6 MiB.
 At 100 MB/s S3 throughput, that is ~56ms read + ~56ms write + overhead, so roughly 250-500ms round-trip.
