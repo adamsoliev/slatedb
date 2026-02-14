@@ -169,3 +169,36 @@ The trade-off is more space and read amplification, both addressable: object sto
 The compactor has four components: `Compactor` (event loop), `CompactorEventHandler` (reacts to manifest poll ticks, executor updates, and shutdown), `CompactionScheduler` (decides what to compact), and `CompactionExecutor` (sort-merges runs into a new run).
 The scheduler is pluggable via `CompactionSchedulerSupplier`; the only current policy is size-tiered (`SizeTieredCompactionSchedulerSupplier`).
 The executor is pluggable via `CompactionExecutor`; the only current implementation is `TokioCompactionExecutor`.
+
+## Timestamps & Time-To-Live
+
+A configuration defines a default TTL and each put can optionally specify a row-level TTL at insertion time. 
+Every read checks row-level metadata and filters out expired records.
+
+SST data format
+```
+// v0
+|  u16    | var |    u32    |  var  |
+|---------|-----|-----------|-------|
+| key_len | key | value_len | value |
+|---------|-----|-----------|-------|
+
+// v1
+|  u16    | var | var  |    u32    |  var  |
+|---------|-----|------|-----------|-------|
+| key_len | key | attr | value_len | value |
+|---------|-----|------|-----------|-------|
+```
+
+In cases where both `Timestamp` and `TimeToLive` are enabled, the row will look like:
+```
+                |-------- attr --------------|
+|  u16    | var |    byte  | i64 |    i64    |    u32    |  var  |
+|---------|-----|----------------------------|-----------|-------|
+| key_len | key | row_flag | ts  | expire_ts | value_len | value |
+|---------|-----|----------|-----|-----------|-----------|-------|
+```
+
+SlateDB uses the system clock internally for TTL expiration. The clock returns the system time in milliseconds since the Unix epoch, and SlateDB enforces monotonicity by tracking the last tick and sleeping briefly if clock skew is detected.
+
+SlateDB includes a TTL compaction filter that tombstones expired records.
