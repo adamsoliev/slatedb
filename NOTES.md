@@ -202,3 +202,21 @@ In cases where both `Timestamp` and `TimeToLive` are enabled, the row will look 
 SlateDB uses the system clock internally for TTL expiration. The clock returns the system time in milliseconds since the Unix epoch, and SlateDB enforces monotonicity by tracking the last tick and sleeping briefly if clock skew is detected.
 
 SlateDB includes a TTL compaction filter that tombstones expired records.
+
+## Checkpoints and Clones
+
+Logically, a checkpoint refers to a consistent (reflects all writes up to some point in time) and durable (across process restarts) view of the database at some point in time.
+Physically, a checkpoint refers to a version of SlateDB’s manifest.
+Checkpoints can be taken from the current manifest, or from an existing checkpoint.
+
+Checkpoint replaces the existing snapshots field in the manifest file.
+
+A writer establishes a checkpoint on start up (by creating a new manifest with new writer epoch and checkpoint entry) and whenever L0s or SRs change (by creating a new manifest with old checkpoint entry replaced)
+
+Readers are created by calling `DbReader::open`. 
+`open` takes an optional checkpoint. 
+If a checkpoint is provided, `DbReader` uses the checkpoint and does not try to refresh/re-establish it. 
+If no checkpoint is provided, `DbReader` establishes its own checkpoint against the latest manifest and periodically polls the manifest at the interval specified in `manifest_poll_interval` to see if it needs to re-establish it.
+
+A clone is a new database that is bootstrapped from a checkpoint of a parent database. 
+At a high level, it copies the parent manifest (L0s, sorted runs, WAL pointers) and records the parent in `external_dbs` list, which includes `source_checkpoint_id` (the checkpoint used to fork) and `final_checkpoint_id` (a checkpoint the clone places on the parent to prevent the parent's GC from deleting SSTs the clone still needs).
