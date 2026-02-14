@@ -205,18 +205,28 @@ SlateDB includes a TTL compaction filter that tombstones expired records.
 
 ## Checkpoints and Clones
 
-Logically, a checkpoint refers to a consistent (reflects all writes up to some point in time) and durable (across process restarts) view of the database at some point in time.
-Physically, a checkpoint refers to a version of SlateDB’s manifest.
-Checkpoints can be taken from the current manifest, or from an existing checkpoint.
+A checkpoint is a consistent, durable view of the database at a point in time.
+Consistent means it reflects all writes up to that point; durable means it survives process restarts.
+Physically, a checkpoint is a version of SlateDB's manifest.
+Checkpoints can be taken from the current manifest or from an existing checkpoint.
+The checkpoint mechanism replaces the older snapshots field in the manifest file.
 
-Checkpoint replaces the existing snapshots field in the manifest file.
+A writer establishes a checkpoint on startup by creating a new manifest with a new writer epoch and a checkpoint entry.
+Whenever L0s or sorted runs change, the writer creates a new manifest with the old checkpoint entry replaced.
 
-A writer establishes a checkpoint on start up (by creating a new manifest with new writer epoch and checkpoint entry) and whenever L0s or SRs change (by creating a new manifest with old checkpoint entry replaced)
+Readers are created via `DbReader::open`, which takes an optional checkpoint.
+If provided, `DbReader` uses it directly without refreshing.
+If omitted, `DbReader` establishes its own checkpoint against the latest manifest and periodically polls at `manifest_poll_interval` to re-establish it as needed.
 
-Readers are created by calling `DbReader::open`. 
-`open` takes an optional checkpoint. 
-If a checkpoint is provided, `DbReader` uses the checkpoint and does not try to refresh/re-establish it. 
-If no checkpoint is provided, `DbReader` establishes its own checkpoint against the latest manifest and periodically polls the manifest at the interval specified in `manifest_poll_interval` to see if it needs to re-establish it.
+A clone is a new database bootstrapped from a checkpoint of a parent database.
+The clone copies the parent's manifest (L0s, sorted runs, WAL pointers) and records the parent in an `external_dbs` list.
+That list entry includes `source_checkpoint_id` (the checkpoint used to fork) and `final_checkpoint_id` (a checkpoint the clone places on the parent to prevent the parent's GC from deleting SSTs the clone still references).
 
-A clone is a new database that is bootstrapped from a checkpoint of a parent database. 
-At a high level, it copies the parent manifest (L0s, sorted runs, WAL pointers) and records the parent in `external_dbs` list, which includes `source_checkpoint_id` (the checkpoint used to fork) and `final_checkpoint_id` (a checkpoint the clone places on the parent to prevent the parent's GC from deleting SSTs the clone still needs).
+## Range Queries
+
+A range query uses the latest checkpoint state to obtain references to memtables, SSTs, and sorted runs.
+The result is a `DbIterator` that iterates records within the requested range.
+Internally, a `MergeIterator` sorts and merges across `MemTableIterator`, `SstIterator` (L0), and `SortedRunIterator`.
+
+By default, only committed records from memtables, L0, and sorted runs are included.
+Under `uncommitted` isolation, unflushed WAL records are also used as a source.
