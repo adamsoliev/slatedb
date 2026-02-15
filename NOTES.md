@@ -264,3 +264,28 @@ Compaction must preserve snapshot isolation, so merging stops at any snapshot ba
 
 When merge operands carry different TTLs, the merge operation only combines values during reads; entries stay separate in storage so each can expire independently.
 Unlike regular values that become tombstones on expiration, expired merge entries are simply dropped, enabling per-element expiration in collections.
+
+## Errors
+
+Public API errors should not expose internal implementation details (so internals can change freely), should be prescriptive (telling users what to do, e.g. whether to retry), should prefer coarse/broad types (only add a new type if users would handle it differently), and should use rich error messages for diagnostics (messages are not part of the public API and can change freely).
+
+## Synchronous commit
+
+The key semantics of Synchronous Commit in general:
+
+A write is only considered committed once the WAL has been persisted to storage. 
+Until then, the data remains invisible to readers.
+If there is a permanent failure while persisting the WAL during a Synchronous Commit, the transaction rolls back. 
+The database instance enters a fatal state and switches to read-only mode.
+It's possible to have multiple levels of Synchronous Commit, or even disable it, allowing users to balance performance and durability requirements.
+Synchronous and Unsynchronous Commits can be interleaved in different transactions. 
+A transaction using Synchronous Commit can read writes from transactions that used Unsynchronous Commit. 
+When a Synchronous Commit persists, it also persists any previous Unsynchronous Commit writes in the WAL.
+
+SlateDB's case, on the write side, a new `SyncLevel` enum (Off, Local, Remote) replaces the current `DurabilityLevel` for writes. 
+When sync is enabled, a write isn't considered committed until the WAL is persisted to the specified level. 
+Commits are strictly ordered — even a `SyncLevel::Off` write must wait for preceding sync writes to commit first.
+
+On the read side, reads default to seeing only "committed" data (regardless of persistence status). 
+A `durability_filter` option lets users further restrict reads to only data persisted at a certain level. 
+A `dirty`: true flag is available for cases where users want to read any persisted data regardless of commit status.
