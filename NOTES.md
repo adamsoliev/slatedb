@@ -289,3 +289,35 @@ Commits are strictly ordered — even a `SyncLevel::Off` write must wait for pre
 On the read side, reads default to seeing only "committed" data (regardless of persistence status). 
 A `durability_filter` option lets users further restrict reads to only data persisted at a certain level. 
 A `dirty`: true flag is available for cases where users want to read any persisted data regardless of commit status.
+
+## Transaction
+
+Transactions need conflict detection to enforce isolation.
+The conflict check verifies that the read and write keys of the committing transaction do not overlap with the write keys of any transaction that committed after it started.
+
+There are several approaches to conflict checking, each with different trade-offs:
+
+| Approach                     | Isolation      | Memory | Spurious aborts             | Complexity |
+|------------------------------|----------------|--------|-----------------------------|------------|
+| MemTable scan (RocksDB)      | SI only        | Low    | High (MemTable rotation)    | Low        |
+| Global Oracle (seq/timestamp) | SI + SSI       | Medium | Low                         | Medium     |
+| Pessimistic locking          | Serializable   | Low    | None (waits instead)        | Medium     |
+| Serialization graph (PG SSI) | Serializable   | Higher | Very low                    | High       |
+
+SlateDB uses a global oracle based on sequence numbers.
+Each transaction receives a start sequence number and a commit sequence number.
+At commit time, the oracle checks the committing transaction against all transactions that committed in the interval between its start and commit.
+
+```
+txn1: [seq:97] <--- ---- ---> [seq:99]
+txn2:     [seq:98]  <--- ---- ---- ---- ---- ---- ---> [seq:105]
+txn3:                               [seq:102] <--- ---> [seq:104]
+txn4:                           [seq:101] <--- ---- ---- ---- ---> [seq:106]
+```
+
+In this example, txn4 (start=101, commit=106) must check conflicts with txn2 (commit=105) and txn3 (commit=104), because both committed after txn4 started.
+It does not check txn1 (commit=99) because txn1 committed before txn4 started.
+
+This also determines when to garbage-collect entries from the `recent_committed_txns` deque: an entry can be removed once all running transactions have a start sequence number greater than the entry's commit sequence number.
+
+Transactions and snapshots have a default expiration time; any that are not finished within that window are considered expired.
