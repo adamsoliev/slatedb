@@ -230,3 +230,37 @@ Internally, a `MergeIterator` sorts and merges across `MemTableIterator`, `SstIt
 
 By default, only committed records from memtables, L0, and sorted runs are included.
 Under `uncommitted` isolation, unflushed WAL records are also used as a source.
+
+## Merge Operator
+
+A merge operator lets applications bypass the read-modify-write cycle by expressing updates as an associative function.
+Instead of reading the current value, modifying it, and writing it back, the caller writes a delta (a merge operand) that gets combined with the existing value lazily -- at read time or during compaction.
+Users provide their own `MergeOperator` implementation via `DbOptions`; without one, the database rejects merge operations.
+
+There are three record types for a key: `Value`, `Tombstone`, and `Merge`.
+Merge operands can be interleaved with values and tombstones in the write stream.
+Both `Value` and `Tombstone` act as barriers: they clear any previous merge history for the same key, so merging only needs to scan backwards until it hits one.
+
+```
+key = "counter"
+
+  put(key, 10)      →  Value(10)        ← barrier
+  merge(key, +1)    →  Merge(+1)
+  merge(key, +3)    →  Merge(+3)
+  ─────────────────────────────────
+  get(key)          →  merge(merge(10, +1), +3) = 14
+
+  delete(key)       →  Tombstone         ← barrier
+  merge(key, +5)    →  Merge(+5)
+  ─────────────────────────────────
+  get(key)          →  merge(default, +5) = 5
+```
+
+Without merge, a read returns the latest `Value` or `None` on `Tombstone`.
+With merge, a read must scan backwards through merge operands until it hits a `Value` or `Tombstone`, then fold all collected operands left-to-right into the base value.
+
+During compaction, entries are eagerly merged: consecutive merge operands are combined with their base value when possible, collapsing the chain into a single `Value`.
+Compaction must preserve snapshot isolation, so merging stops at any snapshot barrier -- a point where some reader may still be observing the pre-merge state.
+
+When merge operands carry different TTLs, the merge operation only combines values during reads; entries stay separate in storage so each can expire independently.
+Unlike regular values that become tombstones on expiration, expired merge entries are simply dropped, enabling per-element expiration in collections.
